@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      bundle-flex-repository:
+        description: Repository of the yceruto/bundle-flex plugin to test with
+        required: false
+        type: string
+      bundle-flex-ref:
+        description: Branch, tag or commit of the plugin
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The plugin under test. Override with the workflow_dispatch inputs or the
+  # BUNDLE_FLEX_REPOSITORY / BUNDLE_FLEX_REF repository variables.
+  BUNDLE_FLEX_REPOSITORY: ${{ inputs.bundle-flex-repository || vars.BUNDLE_FLEX_REPOSITORY || 'tito10047/bundle-flex' }}
+  BUNDLE_FLEX_REF: ${{ inputs.bundle-flex-ref || vars.BUNDLE_FLEX_REF || 'feat/symfony-8' }}
+
+jobs:
+  validate:
+    name: Validate composer.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          coverage: none
+          tools: composer:v2
+
+      - run: composer validate --strict
+
+  e2e:
+    name: PHP ${{ matrix.php }}, ${{ matrix.preset }} features, ${{ matrix.config-format }} config
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.5']
+        preset: [minimal, all]
+        config-format: [php, php-array, yaml]
+        include:
+          - php: '8.2'
+            symfony: '7.4'
+          - php: '8.5'
+            symfony: '8.'
+          - preset: minimal
+            all-features: '0'
+          - preset: all
+            all-features: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: skeleton
+          persist-credentials: false
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.BUNDLE_FLEX_REPOSITORY }}
+          ref: ${{ env.BUNDLE_FLEX_REF }}
+          path: bundle-flex
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          tools: composer:v2
+          ini-values: zend.assertions=1
+
+      - id: composer-cache
+        run: echo "dir=$(composer config --global cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-${{ runner.os }}-php${{ matrix.php }}-${{ github.run_id }}
+          restore-keys: composer-${{ runner.os }}-php${{ matrix.php }}-
+
+      - name: Generate and check a bundle
+        env:
+          BUNDLE_FLEX_NAME: acme/blog-bundle
+          BUNDLE_FLEX_AUTHOR_NAME: Jane Doe
+          BUNDLE_FLEX_AUTHOR_EMAIL: jane@example.com
+          BUNDLE_FLEX_ALL: ${{ matrix.all-features }}
+          BUNDLE_FLEX_CONFIG_FORMAT: ${{ matrix.config-format }}
+        run: skeleton/.github/e2e.sh bundle-flex blog-bundle
+
+      - name: Check the Symfony version
+        working-directory: blog-bundle
+        env:
+          EXPECTED: ${{ matrix.symfony }}
+        run: |
+          version=$(php -r 'require "vendor/autoload.php"; echo Symfony\Component\HttpKernel\Kernel::VERSION;')
+          echo "Symfony $version"
+          [[ $version == "$EXPECTED"* ]] || { echo "::error::Expected Symfony $EXPECTED*, got $version"; exit 1; }
